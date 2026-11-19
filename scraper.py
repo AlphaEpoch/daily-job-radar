@@ -8,10 +8,23 @@ OUTPUT_FILE = os.path.join(OUTPUT_DIR, "index.html")
 TARGET_URL = "https://news.ycombinator.com/jobs"
 
 
-def fetch_jobs(url: str) -> list[dict[str, str]]:
-  headers = {"User-Agent": "Mozilla/5.0"}
-  response = requests.get(url, headers=headers, timeout=15)
-  response.raise_for_status()
+def fetch_jobs(url: str) -> tuple[list[dict[str, str]], str | None]:
+  headers = {
+      "User-Agent": (
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+          " (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+      ),
+      "Accept": (
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+      ),
+      "Accept-Language": "en-US,en;q=0.9",
+  }
+
+  try:
+    response = requests.get(url, headers=headers, timeout=15)
+    response.raise_for_status()
+  except requests.RequestException as exc:
+    return [], f"Fetch failed for {url}: {exc}"
 
   soup = BeautifulSoup(response.text, "html.parser")
   jobs: list[dict[str, str]] = []
@@ -31,29 +44,34 @@ def fetch_jobs(url: str) -> list[dict[str, str]]:
 
     jobs.append({"title": title, "link": href})
 
-  return jobs
+  if not jobs:
+    return (
+        [],
+        "Connected, but 0 matching listings were parsed (page structure or"
+        " challenge page may have changed).",
+    )
+
+  return jobs, None
 
 
-def build_html(jobs: list[dict[str, str]]) -> str:
+def build_html(jobs: list[dict[str, str]], status_note: str | None) -> str:
   updated_at = datetime.datetime.now(datetime.timezone.utc).strftime(
       "%Y-%m-%d %H:%M UTC"
   )
 
-  cards = []
-  for job in jobs:
-    cards.append(
+  if jobs:
+    body_content = "\n".join(
         f"""
         <article class="card">
             <a href="{job["link"]}" target="_blank" rel="noopener noreferrer">{job["title"]}</a>
         </article>
         """.strip()
+        for job in jobs
     )
-
-  cards_html = (
-      "\n".join(cards)
-      if cards
-      else '<p class="empty">No listings found on this run.</p>'
-  )
+  else:
+    body_content = (
+        f'<p class="empty">{status_note or "No listings found on this run."}</p>'
+    )
 
   return f"""<!DOCTYPE html>
 <html lang="en">
@@ -111,7 +129,7 @@ def build_html(jobs: list[dict[str, str]]) -> str:
         <p class="meta">Last updated: {updated_at}</p>
     </header>
     <main>
-        {cards_html}
+        {body_content}
     </main>
 </body>
 </html>
@@ -120,11 +138,13 @@ def build_html(jobs: list[dict[str, str]]) -> str:
 
 def main() -> None:
   os.makedirs(OUTPUT_DIR, exist_ok=True)
-  jobs = fetch_jobs(TARGET_URL)
-  html = build_html(jobs)
+  jobs, status_note = fetch_jobs(TARGET_URL)
+  html = build_html(jobs, status_note)
   with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     f.write(html)
   print(f"Wrote {len(jobs)} jobs to {OUTPUT_FILE}")
+  if status_note:
+    print(status_note)
 
 
 if __name__ == "__main__":
