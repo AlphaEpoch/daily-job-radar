@@ -1,77 +1,177 @@
 import datetime
+import html as html_lib
 import os
+import re
 import requests
-from bs4 import BeautifulSoup
 
 OUTPUT_DIR = "public"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "index.html")
-TARGET_URL = "https://news.ycombinator.com/jobs"
+API_URL = "https://remoteok.com/api"
+
+INCLUDE_KEYWORDS = [
+    "community manager",
+    "community lead",
+    "community management",
+    "community specialist",
+    "community engagement",
+    "project manager",
+    "project coordinator",
+    "program manager",
+    "project operations",
+    "operations manager",
+    "client success",
+    "account manager",
+]
+
+EXCLUDE_KEYWORDS = [
+    "software engineer",
+    "full stack",
+    "fullstack",
+    "frontend",
+    "front-end",
+    "backend",
+    "back-end",
+    "devops",
+    "devsecops",
+    "data engineer",
+    "machine learning",
+    "ml engineer",
+    "solidity",
+    "smart contract",
+    "rust developer",
+    "kubernetes",
+    "cloud architect",
+    "technical project manager",
+    "technical program manager",
+]
 
 
-def fetch_jobs(url: str) -> tuple[list[dict[str, str]], str | None]:
+def matches_term(text: str, term: str) -> bool:
+  pattern_body = re.escape(term.strip().lower()).replace(r"\ ", r"[\s\-/]+")
+  pattern = rf"(?<!\w){pattern_body}(?!\w)"
+  return re.search(pattern, text, flags=re.IGNORECASE) is not None
+
+
+def evaluate_listing(
+    searchable_text: str,
+    include_terms: list[str],
+    exclude_terms: list[str],
+) -> tuple[bool, list[str]]:
+  if any(matches_term(searchable_text, term) for term in exclude_terms):
+    return False, []
+
+  if not include_terms:
+    return True, []
+
+  matched = [
+      term for term in include_terms if matches_term(searchable_text, term)
+  ]
+  return bool(matched), matched
+
+
+def fetch_jobs(
+    url: str,
+    include_terms: list[str],
+    exclude_terms: list[str],
+) -> tuple[list[dict[str, object]], str | None]:
   headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          " (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-      ),
-      "Accept": (
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-      ),
-      "Accept-Language": "en-US,en;q=0.9",
+      "User-Agent": "DailyJobRadarBot/1.0 (github-pages-tracker)",
+      "Accept": "application/json",
   }
 
   try:
     response = requests.get(url, headers=headers, timeout=15)
     response.raise_for_status()
+    data = response.json()
   except requests.RequestException as exc:
     return [], f"Fetch failed for {url}: {exc}"
+  except ValueError as exc:
+    return [], f"Invalid JSON response from {url}: {exc}"
 
-  soup = BeautifulSoup(response.text, "html.parser")
-  jobs: list[dict[str, str]] = []
+  listings = data[1:] if isinstance(data, list) and len(data) > 1 else []
+  jobs: list[dict[str, object]] = []
 
-  for row in soup.select("tr.athing")[:20]:
-    title_span = row.select_one("span.titleline")
-    if not title_span:
-      continue
-    link_tag = title_span.find("a")
-    if not link_tag or not link_tag.get("href"):
+  for item in listings:
+    if not isinstance(item, dict):
       continue
 
-    title = link_tag.get_text(strip=True)
-    href = link_tag["href"]
-    if href.startswith("item?"):
-      href = f"https://news.ycombinator.com/{href}"
+    position = (item.get("position") or "").strip()
+    company = (item.get("company") or "").strip()
+    url_link = (item.get("url") or "").strip()
+    location = (item.get("location") or "").strip()
+    tags = [str(t).strip() for t in (item.get("tags") or []) if t]
 
-    jobs.append({"title": title, "link": href})
+    if not position or not url_link:
+      continue
+
+    # Focus matching on title, company, and tags (full descriptions often mention "engineering" even for PM/community roles)
+    searchable = f"{position} {company} {' '.join(tags)}"
+    is_match, matched_terms = evaluate_listing(
+        searchable, include_terms, exclude_terms
+    )
+    if not is_match:
+      continue
+
+    label = f"{position} — {company}" if company else position
+    jobs.append({
+        "title": label,
+        "link": url_link,
+        "location": location,
+        "matched": matched_terms[:3],
+    })
+
+    if len(jobs) >= 30:
+      break
 
   if not jobs:
     return (
         [],
-        "Connected, but 0 matching listings were parsed (page structure or"
-        " challenge page may have changed).",
+        "Connected, but 0 jobs matched your current include/exclude filters.",
     )
 
   return jobs, None
 
 
-def build_html(jobs: list[dict[str, str]], status_note: str | None) -> str:
+def build_html(
+    jobs: list[dict[str, object]], status_note: str | None
+) -> str:
   updated_at = datetime.datetime.now(datetime.timezone.utc).strftime(
       "%Y-%m-%d %H:%M UTC"
   )
 
   if jobs:
-    body_content = "\n".join(
-        f"""
-        <article class="card">
-            <a href="{job["link"]}" target="_blank" rel="noopener noreferrer">{job["title"]}</a>
-        </article>
-        """.strip()
-        for job in jobs
-    )
+    cards = []
+    for job in jobs:
+      safe_title = html_lib.escape(str(job["title"]))
+      safe_link = html_lib.escape(str(job["link"]), quote=True)
+      location = str(job.get("location") or "")
+      matched = [str(m) for m in (job.get("matched") or [])]
+
+      meta_parts = []
+      if location:
+        meta_parts.append(html_lib.escape(location))
+      if matched:
+        meta_parts.append("Matched: " + ", ".join(html_lib.escape(m) for m in matched))
+      meta_line = (
+          f'<div class="submeta">{" · ".join(meta_parts)}</div>'
+          if meta_parts
+          else ""
+      )
+
+      cards.append(
+          f"""
+            <article class="card">
+                <a href="{safe_link}" target="_blank" rel="noopener noreferrer">{safe_title}</a>
+                {meta_line}
+            </article>
+            """.strip()
+      )
+    body_content = "\n".join(cards)
   else:
-    body_content = (
-        f'<p class="empty">{status_note or "No listings found on this run."}</p>'
+    safe_note = html_lib.escape(
+        status_note or "No listings found on this run."
     )
+    body_content = f'<p class="empty">{safe_note}</p>'
 
   return f"""<!DOCTYPE html>
 <html lang="en">
@@ -118,6 +218,11 @@ def build_html(jobs: list[dict[str, str]], status_note: str | None) -> str:
         .card a:hover {{
             text-decoration: underline;
         }}
+        .submeta {{
+            color: #8b949e;
+            font-size: 0.82rem;
+            margin-top: 6px;
+        }}
         .empty {{
             color: #8b949e;
         }}
@@ -126,7 +231,7 @@ def build_html(jobs: list[dict[str, str]], status_note: str | None) -> str:
 <body>
     <header>
         <h1>Daily Job Radar</h1>
-        <p class="meta">Last updated: {updated_at}</p>
+        <p class="meta">Showing {len(jobs)} matches · Last updated: {updated_at}</p>
     </header>
     <main>
         {body_content}
@@ -138,7 +243,7 @@ def build_html(jobs: list[dict[str, str]], status_note: str | None) -> str:
 
 def main() -> None:
   os.makedirs(OUTPUT_DIR, exist_ok=True)
-  jobs, status_note = fetch_jobs(TARGET_URL)
+  jobs, status_note = fetch_jobs(API_URL, INCLUDE_KEYWORDS, EXCLUDE_KEYWORDS)
   html = build_html(jobs, status_note)
   with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     f.write(html)
