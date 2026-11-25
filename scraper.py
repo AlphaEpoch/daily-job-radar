@@ -3,17 +3,45 @@ import html as html_lib
 import os
 import re
 import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup
 import requests
 
 OUTPUT_DIR = "public"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "index.html")
 
-REMOTEOK_API_URL = "https://remoteok.com/api"
-
-# Add or swap RSS feed URLs for boards/categories you want to check
 RSS_FEEDS = [
-    {"name": "WWR Marketing", "url": "https://weworkremotely.com/categories/remote-marketing-jobs.rss"},
-    {"name": "WWR Product", "url": "https://weworkremotely.com/categories/remote-product-jobs.rss"},
+    {
+        "name": "WWR Sales & Marketing",
+        "url": "https://weworkremotely.com/categories/remote-sales-and-marketing-jobs.rss",
+    },
+    {
+        "name": "WWR Management & Finance",
+        "url": "https://weworkremotely.com/categories/remote-management-and-finance-jobs.rss",
+    },
+    {
+        "name": "WWR Product",
+        "url": "https://weworkremotely.com/categories/remote-product-jobs.rss",
+    },
+    {
+        "name": "WWR All Other",
+        "url": "https://weworkremotely.com/categories/all-other-remote-jobs.rss",
+    },
+    {
+        "name": "Remotive",
+        "url": "https://remotive.com/remote-jobs/feed",
+    },
+    {
+        "name": "Himalayas",
+        "url": "https://himalayas.app/jobs/rss",
+    },
+    {
+        "name": "Jobicy",
+        "url": "https://jobicy.com/?feed=job_feed",
+    },
+    {
+        "name": "RemoteFirstJobs Marketing",
+        "url": "https://remotefirstjobs.com/rss/jobs/marketing.rss",
+    },
 ]
 
 INCLUDE_KEYWORDS = [
@@ -54,16 +82,28 @@ EXCLUDE_KEYWORDS = [
 ]
 
 REQUEST_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Accept": "application/rss+xml, application/xml, application/json, text/html;q=0.9, */*;q=0.8",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        " (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "application/rss+xml, application/atom+xml, application/xml,"
+        " text/xml;q=0.9, */*;q=0.8"
+    ),
     "Accept-Language": "en-US,en;q=0.9",
 }
 
 
+def strip_html(raw_html: str) -> str:
+  if not raw_html:
+    return ""
+  return BeautifulSoup(raw_html, "html.parser").get_text(" ", strip=True)
+
+
 def matches_term(text: str, term: str) -> bool:
-    pattern_body = re.escape(term.strip().lower()).replace(r"\ ", r"[\s\-/]+")
-    pattern = rf"(?<!\w){pattern_body}(?!\w)"
-    return re.search(pattern, text, flags=re.IGNORECASE) is not None
+  pattern_body = re.escape(term.strip().lower()).replace(r"\ ", r"[\s\-/]+")
+  pattern = rf"(?<!\w){pattern_body}(?!\w)"
+  return re.search(pattern, text, flags=re.IGNORECASE) is not None
 
 
 def evaluate_listing(
@@ -71,168 +111,181 @@ def evaluate_listing(
     include_terms: list[str],
     exclude_terms: list[str],
 ) -> tuple[bool, list[str]]:
-    if any(matches_term(searchable_text, term) for term in exclude_terms):
-        return False, []
+  if any(matches_term(searchable_text, term) for term in exclude_terms):
+    return False, []
 
-    if not include_terms:
-        return True, []
+  if not include_terms:
+    return True, []
 
-    matched = [term for term in include_terms if matches_term(searchable_text, term)]
-    return bool(matched), matched
-
-
-def fetch_remoteok(url: str) -> tuple[list[dict[str, str]], str | None]:
-    try:
-        resp = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-    except (requests.RequestException, ValueError) as exc:
-        return [], f"RemoteOK error: {exc}"
-
-    listings = data[1:] if isinstance(data, list) and len(data) > 1 else []
-    items: list[dict[str, str]] = []
-
-    for row in listings:
-        if not isinstance(row, dict):
-            continue
-        position = (row.get("position") or "").strip()
-        company = (row.get("company") or "").strip()
-        link = (row.get("url") or "").strip()
-        location = (row.get("location") or "").strip()
-        tags = [str(t).strip() for t in (row.get("tags") or []) if t]
-
-        if not position or not link:
-            continue
-
-        title = f"{position} — {company}" if company else position
-        items.append({
-            "title": title,
-            "link": link,
-            "location": location,
-            "source": "RemoteOK",
-            "searchable": f"{position} {company} {' '.join(tags)}",
-        })
-
-    return items, None
+  matched = [
+      term for term in include_terms if matches_term(searchable_text, term)
+  ]
+  return bool(matched), matched
 
 
-def fetch_rss_feed(source_name: str, url: str) -> tuple[list[dict[str, str]], str | None]:
-    try:
-        resp = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
-        resp.raise_for_status()
-        root = ET.fromstring(resp.content)
-    except (requests.RequestException, ET.ParseError) as exc:
-        return [], f"{source_name} RSS error: {exc}"
+def extract_atom_link(entry_elem: ET.Element) -> str:
+  ns = {"atom": "http://www.w3.org/2005/Atom"}
+  for link_elem in entry_elem.findall("atom:link", ns) + entry_elem.findall(
+      "link"
+  ):
+    rel = (link_elem.attrib.get("rel") or "alternate").strip()
+    href = (link_elem.attrib.get("href") or "").strip()
+    if href and rel in ("alternate", ""):
+      return href
+  return ""
 
-    items: list[dict[str, str]] = []
 
-    # Supports standard RSS <item> elements
-    for item in root.findall(".//item"):
-        raw_title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
-        category = (item.findtext("category") or "").strip()
+def fetch_rss_feed(
+    source_name: str, url: str
+) -> tuple[list[dict[str, str]], str | None]:
+  try:
+    resp = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+  except (requests.RequestException, ET.ParseError) as exc:
+    return [], f"{source_name}: {exc}"
 
-        if not raw_title or not link:
-            continue
+  items: list[dict[str, str]] = []
 
-        items.append({
-            "title": raw_title,
-            "link": link,
-            "location": "",
-            "source": source_name,
-            "searchable": f"{raw_title} {category}",
-        })
+  # Standard RSS <item> nodes
+  for item in root.findall(".//item"):
+    title = (item.findtext("title") or "").strip()
+    link = (item.findtext("link") or "").strip()
+    categories = " ".join(
+        (c.text or "").strip() for c in item.findall("category") if c.text
+    )
+    summary_text = strip_html(
+        item.findtext("description")
+        or item.findtext("{http://purl.org/rss/1.0/modules/content/}encoded")
+        or ""
+    )
 
-    return items, None
+    if not title or not link:
+      continue
+
+    items.append({
+        "title": title,
+        "link": link,
+        "source": source_name,
+        "searchable": f"{title} {categories} {summary_text[:400]}",
+    })
+
+  # Atom <entry> nodes fallback if no <item> nodes exist
+  if not items:
+    atom_ns = "{http://www.w3.org/2005/Atom}"
+    for entry in root.findall(f".//{atom_ns}entry"):
+      title = (entry.findtext(f"{atom_ns}title") or "").strip()
+      link = extract_atom_link(entry)
+      summary_text = strip_html(
+          entry.findtext(f"{atom_ns}summary")
+          or entry.findtext(f"{atom_ns}content")
+          or ""
+      )
+
+      if not title or not link:
+        continue
+
+      items.append({
+          "title": title,
+          "link": link,
+          "source": source_name,
+          "searchable": f"{title} {summary_text[:400]}",
+      })
+
+  return items, None
 
 
 def collect_jobs(
+    feeds: list[dict[str, str]],
     include_terms: list[str],
     exclude_terms: list[str],
 ) -> tuple[list[dict[str, object]], list[str]]:
-    raw_items: list[dict[str, str]] = []
-    notes: list[str] = []
+  raw_items: list[dict[str, str]] = []
+  notes: list[str] = []
 
-    rok_items, rok_err = fetch_remoteok(REMOTEOK_API_URL)
-    if rok_err:
-        notes.append(rok_err)
-    raw_items.extend(rok_items)
+  for feed in feeds:
+    feed_items, err = fetch_rss_feed(feed["name"], feed["url"])
+    if err:
+      notes.append(err)
+    raw_items.extend(feed_items)
 
-    for feed in RSS_FEEDS:
-        rss_items, rss_err = fetch_rss_feed(feed["name"], feed["url"])
-        if rss_err:
-            notes.append(rss_err)
-        raw_items.extend(rss_items)
+  seen_links: set[str] = set()
+  matched_jobs: list[dict[str, object]] = []
 
-    seen_links: set[str] = set()
-    matched_jobs: list[dict[str, object]] = []
+  for entry in raw_items:
+    link = entry["link"]
+    if link in seen_links:
+      continue
+    seen_links.add(link)
 
-    for entry in raw_items:
-        link = entry["link"]
-        if link in seen_links:
-            continue
-        seen_links.add(link)
+    is_match, matched_terms = evaluate_listing(
+        entry["searchable"], include_terms, exclude_terms
+    )
+    if not is_match:
+      continue
 
-        is_match, matched_terms = evaluate_listing(
-            entry["searchable"], include_terms, exclude_terms
-        )
-        if not is_match:
-            continue
+    matched_jobs.append({
+        "title": entry["title"],
+        "link": link,
+        "source": entry["source"],
+        "matched": matched_terms[:3],
+    })
 
-        matched_jobs.append({
-            "title": entry["title"],
-            "link": link,
-            "location": entry["location"],
-            "source": entry["source"],
-            "matched": matched_terms[:3],
-        })
+    if len(matched_jobs) >= 50:
+      break
 
-        if len(matched_jobs) >= 40:
-            break
-
-    return matched_jobs, notes
+  return matched_jobs, notes
 
 
 def build_html(jobs: list[dict[str, object]], notes: list[str]) -> str:
-    updated_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+  updated_at = datetime.datetime.now(datetime.timezone.utc).strftime(
+      "%Y-%m-%d %H:%M UTC"
+  )
 
-    if jobs:
-        cards = []
-        for job in jobs:
-            safe_title = html_lib.escape(str(job["title"]))
-            safe_link = html_lib.escape(str(job["link"]), quote=True)
-            source = html_lib.escape(str(job.get("source") or ""))
-            location = str(job.get("location") or "")
-            matched = [str(m) for m in (job.get("matched") or [])]
+  if jobs:
+    cards = []
+    for job in jobs:
+      safe_title = html_lib.escape(str(job["title"]))
+      safe_link = html_lib.escape(str(job["link"]), quote=True)
+      source = html_lib.escape(str(job.get("source") or ""))
+      matched = [str(m) for m in (job.get("matched") or [])]
 
-            meta_parts = []
-            if source:
-                meta_parts.append(source)
-            if location:
-                meta_parts.append(html_lib.escape(location))
-            if matched:
-                meta_parts.append("Matched: " + ", ".join(html_lib.escape(m) for m in matched))
+      meta_parts = []
+      if source:
+        meta_parts.append(source)
+      if matched:
+        meta_parts.append(
+            "Matched: " + ", ".join(html_lib.escape(m) for m in matched)
+        )
 
-            meta_html = f'<div class="submeta">{" · ".join(meta_parts)}</div>' if meta_parts else ""
-            cards.append(
-                f"""
-                <article class="card">
-                    <a href="{safe_link}" target="_blank" rel="noopener noreferrer">{safe_title}</a>
-                    {meta_html}
-                </article>
-                """.strip()
-            )
-        body_content = "\n".join(cards)
-    else:
-        fallback = notes[0] if notes else "No jobs matched your current filters on this run."
-        body_content = f'<p class="empty">{html_lib.escape(fallback)}</p>'
+      meta_html = (
+          f'<div class="submeta">{" · ".join(meta_parts)}</div>'
+          if meta_parts
+          else ""
+      )
+      cards.append(
+          f"""
+            <article class="card">
+                <a href="{safe_link}" target="_blank" rel="noopener noreferrer">{safe_title}</a>
+                {meta_html}
+            </article>
+            """.strip()
+      )
+    body_content = "\n".join(cards)
+  else:
+    fallback = (
+        notes[0]
+        if notes
+        else "No jobs matched your current include/exclude filters."
+    )
+    body_content = f'<p class="empty">{html_lib.escape(fallback)}</p>'
 
-    notes_banner = ""
-    if notes and jobs:
-        joined_notes = html_lib.escape(" | ".join(notes))
-        notes_banner = f'<p class="warn">Source warnings: {joined_notes}</p>'
+  notes_banner = ""
+  if notes and jobs:
+    joined_notes = html_lib.escape(" | ".join(notes))
+    notes_banner = f'<p class="warn">Feed warnings: {joined_notes}</p>'
 
-    return f"""<!DOCTYPE html>
+  return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
@@ -307,15 +360,15 @@ def build_html(jobs: list[dict[str, object]], notes: list[str]) -> str:
 
 
 def main() -> None:
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    jobs, notes = collect_jobs(INCLUDE_KEYWORDS, EXCLUDE_KEYWORDS)
-    html = build_html(jobs, notes)
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        f.write(html)
-    print(f"Wrote {len(jobs)} jobs to {OUTPUT_FILE}")
-    for note in notes:
-        print(note)
+  os.makedirs(OUTPUT_DIR, exist_ok=True)
+  jobs, notes = collect_jobs(RSS_FEEDS, INCLUDE_KEYWORDS, EXCLUDE_KEYWORDS)
+  html = build_html(jobs, notes)
+  with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+    f.write(html)
+  print(f"Wrote {len(jobs)} jobs to {OUTPUT_FILE}")
+  for note in notes:
+    print(note)
 
 
 if __name__ == "__main__":
-    main()
+  main()
